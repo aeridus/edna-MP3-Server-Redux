@@ -42,11 +42,13 @@ import re
 import stat
 import random
 import time
+import datetime
 import struct
 import zipfile
 import ezt
 import MP3Info
 import md5
+import codecs
 
 try:
   import signal
@@ -73,9 +75,13 @@ except ImportError:
 
 error = __name__ + '.error'
 
+u8enc = codecs.getencoder("utf_8")
+u8dec = codecs.getdecoder("utf_8")
+
+u16enc = codecs.getencoder("utf_16")
+u16dec = codecs.getdecoder("utf_16")
 
 TITLE = 'Streaming MP3 Server'
-
 
 # a pattern used to trim leading digits, spaces, and dashes from a song
 ### would be nice to get a bit fancier with the possible trimming
@@ -95,6 +101,8 @@ except ImportError:
 
 class Server(mixin, BaseHTTPServer.HTTPServer):
   def __init__(self, fname):
+    EdnaRequestHandler.protocol_version = "HTTP/1.1"
+
     self.userLog = [ ] # to track server usage
     self.userIPs = { } # log unique IPs
 
@@ -296,6 +304,10 @@ class Server(mixin, BaseHTTPServer.HTTPServer):
 
 class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
+  def address_string(self):
+    host, port = self.client_address[:2]
+    return host
+
   def do_GET(self):
     try:
       self._perform_GET()
@@ -386,7 +398,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       # home page
       subdirs = [ ]
       for d, name in self.server.dirs:
-        subdirs.append(_datablob(href=urllib.quote(name) + '/', is_new='',
+        subdirs.append(_datablob(href=urllib.quote(name.encode("utf-8")) + '/', is_new='',
                                  text=name))
       self.display_page(TITLE, subdirs, skiprec=1)
     elif path and path[0] == 'stats':
@@ -406,7 +418,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         url = '/'
         curdir = self.server.dirs[0][0]
       else:
-        url = '/' + urllib.quote(path[0])
+        url = '/' + urllib.quote(path[0].encode("utf-8"))
         for d, name in self.server.dirs:
           if path[0] == name:
             curdir = d
@@ -425,6 +437,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
           return
 
         pathname = os.path.join(curdir, p)
+
         base, ext = os.path.splitext(p)
         if string.lower(ext) == '.m3u':
           base, ext = os.path.splitext(base)
@@ -443,9 +456,9 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
         curdir = pathname
         if url == '/':
-          url = '/' + urllib.quote(p)
+          url = '/' + urllib.quote(p.encode("utf-8"))
         else:
-          url = url + '/' + urllib.quote(p)
+          url = url + '/' + urllib.quote(p.encode("utf-8"))
 
       # requested a directory.
 
@@ -470,13 +483,14 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       thisdirlen = len(thisdir)
 
       for name in sort_dir(curdir):
-        href = urllib.quote(name)
         try:
           is_new = check_new(os.stat(os.path.join(curdir, name))[stat.ST_MTIME])
         except: 
           # For example, in the case of disk I/O errors
           print "Failed to stat %s"%(name)
           continue
+
+        href = urllib.quote(name.encode("utf-8"))
         nameLower = name.lower()
         if nameLower in HIDE_EXACT: continue
         skip = False
@@ -493,7 +507,8 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         ext = string.lower(ext)
 
         if picture_extensions.has_key(ext):
-          pictures.append(_datablob(href=href, is_new=is_new))
+          if ext != '.ico':
+            pictures.append(_datablob(href=href, is_new=is_new))
           continue
 
         if plainfiles_extensions.has_key(ext):
@@ -533,10 +548,6 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       self.display_page(title, subdirs, pictures, plainfiles, songs, playlists)
 
   def display_stats(self):
-    self.send_response(200)
-    self.send_header("Content-Type", 'text/html')
-    self.end_headers()
-
     data = { 'users' : [ ],
              'ips' : [ ],
              }
@@ -546,6 +557,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       d = _datablob()
       d.ip, tm, d.url = user_log[i]
       d.unquoted_url = urllib.unquote(d.url)
+      d.unquoted_url, count = u8dec(d.unquoted_url)
       d.time = time.strftime("%B %d %I:%M:%S %p", time.localtime(tm))
       data['users'].append(d)
 
@@ -559,11 +571,19 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       d.time = time.strftime("%B %d %I:%M:%S %p", time.localtime(tm))
       data['ips'].append(d)
 
-    self.server.stats_template.generate(self.wfile, data)
+    stringBuffer = StringIO.StringIO()
+    self.server.stats_template.generate(stringBuffer, data)
+
+    self.send_response(200)
+    self.send_header("Content-Type", 'text/html')
+    self.send_header("Content-Length", len(stringBuffer.getvalue()))
+    self.send_header('Last-Modified', self.date_time_string())
+    self.end_headers()
+
+    self.wfile.write(stringBuffer.getvalue())
 
   def display_page(self, title, subdirs, pictures=[], plainfiles=[], songs=[], playlists=[],
                    skiprec=0):
-
     ### implement a URL-selectable style here with a cache of templates
     if self.output_style == 'html':
       template = self.server.default_template
@@ -571,10 +591,6 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     else: # == 'xml'
       template = self.server.xml_template
       content_type = 'text/xml'
-
-    self.send_response(200)
-    self.send_header("Content-Type", content_type)
-    self.end_headers()
 
     data = { 'title' : title,
              'links' : self.tree_position(),
@@ -590,7 +606,16 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     else:
       data['display-recursive'] = ''
 
-    template.generate(self.wfile, data)
+    stringBuffer = StringIO.StringIO()
+    template.generate(stringBuffer, data)
+
+    self.send_response(200)
+    self.send_header("Content-Type", content_type)
+    self.send_header("Content-Length", len(stringBuffer.getvalue()))
+    self.send_header('Last-Modified', self.date_time_string())
+    self.end_headers()
+
+    self.wfile.write(stringBuffer.getvalue())
 
   def tree_position(self):
     mypath = self.translate_path()
@@ -603,7 +628,8 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     last = len(mypath)
     for count in range(last):
-      url = url + '/' + urllib.quote(mypath[count])
+      mypath[count] = mypath[count]
+      url = url + '/' + urllib.quote(mypath[count].encode("utf-8"))
       text = cgi.escape(mypath[count])
       if count == last - 1:
         links.append('<b> / %s</b>' % text)
@@ -626,7 +652,6 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     # until it hits the inherent limit in Python for the number of functions.
     # This number is quite large. I found this out the hard way :). Learn
     # from my experience...
-
     if songs is None:
       songs = []
 
@@ -643,7 +668,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       # recurse down into subdirectories looking for more MP3s.
       if recursive and os.path.isdir(fullpath + '/' + name):
         songs = self.make_list(fullpath + '/' + name,
-                               url + '/' + urllib.quote(name),
+                               url + '/' + urllib.quote(name.encode("utf-8")),
                                recursive, 0,	# don't shuffle subdir results
                                songs)
 
@@ -673,6 +698,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       if os.path.isabs(line):
         self.log_message('bad line in "%s": %s', self.path, line)
         continue
+
       if not os.path.exists(os.path.join(dirpath, line)):
         self.log_message('file not found (in "%s"): %s', self.path, line)
         continue
@@ -690,10 +716,10 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       if not picture_extensions.has_key(ext):
         # log the request of this file
         ip, port = self.client_address
-        self.server.log_user(ip, time.time(), url + '/' + urllib.quote(name))
+        self.server.log_user(ip, time.time(), url + '/' + urllib.quote(name.encode("utf-8")))
 
       # get the file and info for delivery
-      type = any_extensions[ext]
+      filetype = any_extensions[ext]
       f = open(fullpath, 'rb')
       st = os.fstat(f.fileno())
       clen = st.st_size
@@ -703,7 +729,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       self.send_error(404)
       return
     elif ext == '.m3u':
-      type = 'audio/x-mpegurl'
+      filetype = 'audio/x-mpegurl'
       if name == 'all.m3u' or name == 'allrecursive.m3u' or \
          name == 'shuffle.m3u' or name == 'shufflerecursive.m3u':
         recursive = name == 'allrecursive.m3u' or name == 'shufflerecursive.m3u'
@@ -717,7 +743,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       else:
         base, ext = os.path.splitext(base)
         if extensions.has_key(string.lower(ext)):
-          f = StringIO.StringIO(self.build_url(url, base) + ext + '\n')
+          f = StringIO.StringIO(self.build_url(url, base) + ext.encode("utf-8") + '\n')
           clen = len(f.getvalue())
         else:
           f = self.open_playlist(fullpath, url)
@@ -728,7 +754,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.send_error(403, 'The ZIP service has been disabled by the server administrator.')
         return
 
-      type = 'application/zip'
+      filetype = 'application/zip'
       f = StringIO.StringIO()
       z = zipfile.ZipFile(f, 'w', zipfile.ZIP_STORED)
       songs = self.make_list(fullpath, None, None, None)
@@ -740,7 +766,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       z.close()
       f.seek(0)
       clen = len(f.getvalue())
-      self.server.debug_message("ZUP thresholds: %d + %d vs %d" %
+      self.server.debug_message("ZIP thresholds: %d + %d vs %d" %
                                 (self.server.zipsize, clen, self.server.zipmax))
 
       if self.server.zipsize + clen > self.server.zipmax:
@@ -752,21 +778,23 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       self.send_error(404)
       return
 
-    self.send_response(200)
-    self.send_header("Content-Type", type)
-    self.send_header("Content-Length", clen)
-    if mtime:
-      self.send_header('Last-Modified', time.strftime("%a, %d %b %Y %T GMT"))
-    # Thanks to Stefan Alfredsson <stefan@alfredsson.org>
-    # for the suggestion, Now the filenames get displayed right.
-    self.send_header("icy-name", base)
-    self.end_headers()
-
-    #Seek if the client requests it (a HTTP/1.1 request)
+    #Seek if the client requests it (an HTTP/1.1 request)
     if range:
-      type, seek = string.split(range,'=')
+      filetype, seek = string.split(range,'=')
       startSeek, endSeek = string.split(seek,'-')
       f.seek(int(startSeek))
+      clen = clen - int(startSeek)
+
+    self.send_response(200)
+    self.send_header("Content-Type", filetype)
+    self.send_header("Content-Length", clen)
+    self.send_header("Accept-Ranges", "bytes")
+    if mtime:
+     self.send_header('Last-Modified', self.date_time_string(mtime))
+    # Thanks to Stefan Alfredsson <stefan@alfredsson.org>
+    # for the suggestion, Now the filenames get displayed right.
+    self.send_header("icy-name", base.encode("utf-8"))
+    self.end_headers()
 
     while 1:
       data = f.read(8192)
@@ -781,18 +809,20 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         # it was probably closed on the other end
         break
 
-    if type == 'application/zip':
+    if filetype == 'application/zip':
       self.server.zipsize -= clen
 
   def build_url(self, url, file=''):
     host = self.server.name_prefix or self.headers.getheader('host') or self.server.server_name
     if string.find(host, ':'):
-      return 'http://%s%s/%s' % (host, url, urllib.quote(file))
+      return 'http://%s%s/%s' % (host, url, urllib.quote(file.encode("utf-8")))
     return 'http://%s:%s%s/%s' % (host, self.server.server_port, url,
-                                  urllib.quote(file))
+                                  urllib.quote(file.encode("utf-8")))
 
   def translate_path(self):
-    parts = string.split(urllib.unquote(self.path), '/')
+    unquotedselfpath = urllib.unquote(self.path)
+    unquotedselfpath, count = u8dec(unquotedselfpath)
+    parts = string.split(unquotedselfpath, '/')
     parts = filter(None, parts)
     while 1:
       try:
@@ -878,6 +908,18 @@ class _SocketWriter:
         # re-raise the error
         raise
 
+  def flush(self):
+    try:
+      return self.wfile.flush()
+    except IOError, v:
+      if v.errno == 32 or v.errno == 104 or v.errno == 10053:
+        # Ignore the error
+        pass
+      else:
+        # not a 'Broken pipe' or Connection reset by peer
+        # re-raise the error
+        raise
+
 class ClientAbortedException(Exception):
   pass
 
@@ -906,18 +948,17 @@ class FileInfo:
     if ext == '.ogg':
       info = OggInfo(fullpath)
       self.__dict__.update(info.__dict__)
-    else:
+    elif ext == '.mp3':
       info = MP3Info.MP3Info(open(fullpath, 'rb'))
       self.__dict__.update(info.__dict__)
-      self.total_time = info.mpeg.total_time;
-      self.filesize = info.mpeg.filesize2
-      self.bitrate = int(info.mpeg.bitrate)
-      self.samplerate = info.mpeg.samplerate/1000
-      self.mode = info.mpeg.mode
-      self.mode_extension = info.mpeg.mode_extension
+    else:
+      self.total_time = 0;
+      self.filesize = 0
+      self.bitrate = "unknown"
+      self.samplerate = "unknown"
+      self.mode = ""
+      self.mode_extension = ""
 
-      
-#    if hasattr(info, 'length'):
     if self.total_time > 3600:
       self.duration = '%d:%02d:%02d' % (int(self.total_time / 3600),
                                           int(self.total_time / 60) % 60,
@@ -942,8 +983,8 @@ class OggInfo:
     # Setup the defaults
     self.valid = 0
     self.total_time = 0
-    self.samplerate = 'unkown'
-    self.bitrate = 'unkown'
+    self.samplerate = 'unknown'
+    self.bitrate = 'unknown'
     self.mode = ''
     self.mode_extension = ''
 
@@ -989,7 +1030,7 @@ class OggInfo:
 
 
 def _usable_file(fname):
-  return fname[0] != '.'
+  return fname[0] != "."
 
 def sort_dir(d):
   l = filter(_usable_file, os.listdir(d))
@@ -1009,29 +1050,69 @@ def check_new(ctime):
 
 
 
-# Extensions that WinAMP can handle: (and their MIME type if applicable)
+# Extensions that foobar2000 can handle along with their MIME types:
+# Some require foo_midi or foo_dumb installed in order to play.
 extensions = {
-  '.mp3' : 'audio/mpeg',
+  '.669' : 'audio/x-mod',
+  '.8svx' : 'audio/x-8svx',
+  '.aac' : 'audio/aac',
+  '.afc' : 'audio/x-aiff',
+  '.aif' : 'audio/x-aiff',
+  '.aifc' : 'audio/x-aiff',
+  '.aiff' : 'audio/x-aiff',
+  '.am' : 'audio/x-mod',
+  '.au' : 'audio/basic',
+  '.dsm' : 'audio/x-mod',
+  '.far' : 'audio/x-mod', # Not supported by foobar2000 yet?
+  '.fla' : 'audio/flac',
+  '.flac' : 'audio/flac',
+  '.gmf' : 'audio/mid',
+  '.hmi' : 'audio/mid',
+  '.hmp' : 'audio/mid',
+  '.it' : 'audio/x-mod',
+  '.itz' : 'audio/x-mod',
+  '.j2b' : 'audio/x-mod',
+  '.m4a' : 'audio/mp4a-latm',
+  '.m4b' : 'audio/mp4a-latm',
+  '.mdz' : 'audio/x-mod',
   '.mid' : 'audio/mid',
-  '.mp2' : 'video/mpeg',        ### is this audio or video? my Windows box
-                                ### says video/mpeg
-#  '.cda',                      ### what to do with .cda?
-  '.it'  : 'audio/mid',
-  '.xm'  : 'audio/mid',
-  '.s3m' : 'audio/mid',
-  '.stm' : 'audio/mid',
-  '.mod' : 'audio/mid',
-  '.dsm' : 'audio/mid',
-  '.far' : 'audio/mid',
-  '.ult' : 'audio/mid',
-  '.mtm' : 'audio/mid',
-  '.669' : 'audio/mid',
-  '.asx' : 'video/x-ms-asf',
-  '.avi' : 'video/x-msvideo',
-  '.mpg' : 'video/mpeg',
-  '.ogg' : 'application/x-ogg',
-  '.m4a' : 'audio/mp4',
-  '.mp4' : 'video/mp4',  
+  '.midi' : 'audio/mid',
+  '.mids' : 'audio/mid',
+  '.mka' : 'audio/x-matroska',
+  '.mo3' : 'audio/x-mod',
+  '.mod' : 'audio/x-mod',
+  '.mp+' : 'audio/musepack',
+  '.mp1' : 'audio/mpeg',
+  '.mp2' : 'audio/mpeg',
+  '.mp3' : 'audio/mpeg',
+  '.mpc' : 'audio/musepack',
+  '.mpp' : 'audio/musepack',
+  '.mtm' : 'audio/x-mod',
+  '.mtz' : 'audio/x-mod',
+  '.mus' : 'audio/mid',
+  '.oga' : 'audio/ogg',
+  '.ogg' : 'audio/ogg',
+  '.psm' : 'audio/x-mod',
+  '.ptm' : 'audio/x-mod',
+  '.ptz' : 'audio/x-mod',
+  '.rmi' : 'audio/mid',
+  '.s3m' : 'audio/x-mod',
+  '.s3z' : 'audio/x-mod',
+  '.snd' : 'audio/basic',
+  '.spx' : 'audio/ogg',
+  '.stm' : 'audio/x-mod',
+  '.stz' : 'audio/x-mod',
+  '.svx' : 'audio/x-8svx',
+  '.ult' : 'audio/x-mod', # Not supported by foobar2000 yet?
+  '.umx' : 'audio/x-mod',
+  '.w64' : 'audio/x-wav',
+  '.wav' : 'audio/x-wav',
+  '.wave' : 'audio/x-wav',
+  '.wma' : 'audio/x-ms-wma',
+  '.wv' : 'audio/wavpack',
+  '.xm' : 'audio/x-mod',
+  '.xmi' : 'audio/mid',
+  '.xmz' : 'audio/x-mod',
   }
 
 # Extensions of images: (and their MIME type)
@@ -1040,6 +1121,7 @@ picture_extensions = {
   '.jpeg' : 'image/jpeg',
   '.jpg' : 'image/jpeg',
   '.png' : 'image/png',
+  '.ico' : 'image/x-icon'
   }
 
 # Extensions of non-streamed, non-media files we want to serve: (and their MIME type)
@@ -1145,7 +1227,6 @@ def daemonize(stdin='/dev/null', stdout='/dev/null', stderr='/dev/null',pname=''
     os.dup2(so.fileno(), sys.stdout.fileno())
     os.dup2(se.fileno(), sys.stderr.fileno())
 
-
 if __name__ == '__main__':
   fname = 'edna.conf'
   daemon_mode=0
@@ -1159,7 +1240,7 @@ if __name__ == '__main__':
 
   if os.path.isfile(fname) != 1:
     print "edna: %s:No such file" %fname
-    raise systemExit
+    raise SystemExit
 
   if daemon_mode:
     daemonize('/dev/null', '/var/log/edna.log', '/var/log/edna.log', '/var/run/edna.pid')

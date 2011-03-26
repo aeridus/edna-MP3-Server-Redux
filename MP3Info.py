@@ -64,233 +64,10 @@ import struct
 import string
 import random
 import re
-
-def _from_synch_safe(synchsafe):
-    if isinstance(synchsafe, type(1)):
-        (b3, b2, b1, b0) = struct.unpack('!4b', struct.pack('!1i', synchsafe))
-    else:
-        while len(synchsafe) < 4:
-            synchsafe = (0,) + synchsafe
-        (b3, b2, b1, b0) = synchsafe
-
-    x = 128
-    return (((b3 * x + b2) * x + b1) * x + b0)
-
-def _strip_zero(s):
-    start = 0
-    while start < len(s) and (s[start] == '\0' or s[start] == ' '):
-        start = start + 1
-
-    end = len(s) - 1
-    while end >= 0 and (s[end] == '\0' or s[end] == ' '):
-        end = end - 1
-
-    return s[start:end+1]
+import id3reader
 
 class Error(Exception):
     pass
-
-# MP3ext causes illegal frames to be inserted, which must be ignored.
-_known_bad_frames = [
-    "\x00\x00MP",
-    "\x00MP3",
-    " MP3",
-    "MP3e",
-    "\x00MP",
-    " MP",
-    "MP3",
-]
-
-class ID3v2Frame:
-    def __init__(self, file, version):
-        self.name = ""
-        self.version = 0
-        self.padding = 0
-        self.size = 0
-        self.data = ""
-
-        self.flags = {}
-        self.f_tag_alter_preservation = 0
-        self.f_file_alter_preservation = 0
-        self.f_read_only = 0
-        self.f_compression = 0
-        self.f_encryption = 0
-        self.f_grouping_identity = 0
-        self.f_unsynchronization = 0
-        self.f_data_length_indicator = 0
-
-        if version == 2:
-            nameSize = 3
-        else:
-            nameSize = 4
-        self.name = file.read(nameSize)
-
-        # mp3ext writes padding (wrongfully) as "MP3ext V...."
-        # so we ignore this tag.
-        if self.name in _known_bad_frames:
-            self.padding = 1
-            return
-
-        self.version = version
-
-        if self.name == nameSize * '\0':
-            self.padding = 1
-            return
-
-        if self.name[0] < 'A' or self.name[0] > 'Z':
-            self.padding = 1
-            return
-
-        size = ()
-        if version == 2:
-            size = struct.unpack('!3B', file.read(3))
-            self.size = (size[0] * 256 + size[1]) * 256 + size[2]
-        elif version == 3:
-            size = struct.unpack('!L', file.read(4))
-            self.size = size[0]
-        elif version == 4:
-            size = struct.unpack('!4B', file.read(4))
-            self.size = _from_synch_safe(size)
-
-        if version == 3:  # abc00000 def00000
-            (flags,) = struct.unpack('!1b', file.read(1))
-            self.f_tag_alter_preservation  = flags >> 7 & 1 #a
-            self.f_file_alter_preservation = flags >> 6 & 1 #b
-            self.f_read_only               = flags >> 5 & 1 #c
-            (flags,) = struct.unpack('!1b', file.read(1))
-            self.f_compression             = flags >> 7 & 1 #d
-            self.f_encryption              = flags >> 6 & 1 #e
-            self.f_grouping_identity       = flags >> 5 & 1 #f
-        elif version == 4: # 0abc0000 0h00kmnp
-            (flags,) = struct.unpack('!1b', file.read(1))
-            self.f_tag_alter_preservation  = flags >> 6 & 1 #a
-            self.f_file_alter_preservation = flags >> 5 & 1 #b
-            self.f_read_only               = flags >> 4 & 1 #c
-            (flags,) = struct.unpack('!1b', file.read(1))
-            self.f_grouping_identity       = flags >> 6 & 1 #h
-            self.f_compression             = flags >> 3 & 1 #k
-            self.f_encryption              = flags >> 2 & 1 #m
-            self.f_unsynchronization       = flags >> 1 & 1 #n
-            self.f_data_length_indicator   = flags >> 0 & 1 #p
-
-        self.data = _strip_zero(file.read(self.size))
-
-_genres = [
-    "Blues", "Classic Rock", "Country", "Dance", "Disco", "Funk", "Grunge",
-    "Hip-Hop", "Jazz", "Metal", "New Age", "Oldies", "Other", "Pop", "R&B",
-    "Rap", "Reggae", "Rock", "Techno", "Industrial", "Alternative", "Ska",
-    "Death Metal", "Pranks", "Soundtrack", "Euro-Techno", "Ambient", "Trip-Hop",
-    "Vocal", "Jazz+Funk", "Fusion", "Trance", "Classical", "Instrumental",
-    "Acid", "House", "Game", "Sound Clip", "Gospel", "Noise", "AlternRock",
-    "Bass", "Soul", "Punk", "Space", "Meditative", "Instrumental Pop",
-    "Instrumental Rock", "Ethnic", "Gothic", "Darkwave", "Techno-industrial",
-    "Electronic", "Pop-Folk", "Eurodance", "Dream", "Southern Rock", "Comedy",
-    "Cult", "Gangsta", "Top 40", "Christian Rap", "Pop/Funk", "Jungle",
-    "Native American", "Cabaret", "New Wave", "Psychadelic", "Rave",
-    "Showtunes", "Trailer", "Lo-Fi", "Tribal", "Acid Punk", "Acid Jazz",
-    "Polka", "Retro", "Musical", "Rock & Roll", "Hard Rock", "Folk",
-    "Folk/Rock", "National Folk", "Swing", "Fast-Fusion", "Bebob", "Latin",
-    "Revival", "Celtic", "Bluegrass", "Avantegarde", "Gothic Rock",
-    "Progressive Rock", "Psychedelic Rock", "Symphonic Rock", "Slow Rock",
-    "Big Band", "Chorus", "Easy Listening", "Acoustic", "Humour", "Speech",
-    "Chanson", "Opera", "Chamber Music", "Sonata", "Symphony", "Booty Bass",
-    "Primus", "Porn Groove", "Satire", "Slow Jam", "Club", "Tango", "Samba",
-    "Folklore", "Ballad", "Power Ballad", "Rythmic Soul", "Freestyle", "Duet",
-    "Punk Rock", "Drum Solo", "A capella", "Euro-House", "Dance Hall", "Goa",
-    "Drum & Bass", "Club House", "Hardcore", "Terror", "Indie", "BritPop",
-    "NegerPunk", "Polsk Punk", "Beat", "Christian Gangsta", "Heavy Metal",
-    "Black Metal", "Crossover", "Contemporary Christian", "Christian Rock", "Merengue",
-    "Salsa", "Thrash Metal", "Anime", "JPop", "SynthPop",
-]
-
-class ID3v1:
-    def __init__(self, file):
-        self.valid = 0
-
-        self.tags = { }
-
-        try:
-            file.seek(-128, 2)
-        except IOError:
-            pass
-
-        data = file.read(128)
-        if data[0:3] != 'TAG':
-            return
-        else:
-            self.valid = 1
-
-        self.tags['TT2'] = _strip_zero(data[ 3: 33])
-        self.tags['TP1'] = _strip_zero(data[33: 63])
-        self.tags['TAL'] = _strip_zero(data[63: 93])
-        self.tags['TYE'] = _strip_zero(data[93: 97])
-        self.tags['COM'] = _strip_zero(data[97:125])
-
-        if data[125] == '\0':
-            self.tags['TRK'] = ord(data[126])
-
-        try:
-            self.tags['TCO'] = _genres[ord(data[127])]
-        except IndexError:
-            self.tags['TCO'] = None
-        
-
-class ID3v2:
-    def __init__(self, file):
-        self.valid = 0
-
-        self.tags = { }
-
-        self.header_size = 0
-
-        self.major_version = 0
-        self.minor_version = 0
-
-        self.f_unsynchronization = 0
-        self.f_extended_header = 0
-        self.f_experimental = 0
-        self.f_footer = 0
-
-        self.f_extended_header_zie = 0
-        self.f_extended_num_flag_bytes = 0
-
-        self.ef_update = 0
-        self.ef_crc = 0
-        self.ef_restrictions = 0
-
-        self.crc = 0
-        self.restrictions = 0
-
-        self.frames = []
-        self.tags = {}
-        
-        file.seek(0, 0)
-        if file.read(3) != "ID3":
-            return
-        else:
-            self.valid = 1
-
-        (self.major_version, self.minor_version) = struct.unpack('!2b', file.read(2))
-
-        # abcd 0000
-        (flags,) = struct.unpack('!1b', file.read(1))
-        self.f_unsynchronization = flags >> 7 & 1 # a
-        self.f_extended_header   = flags >> 6 & 1 # b
-        self.f_experimental      = flags >> 5 & 1 # c
-        self.f_footer            = flags >> 4 & 1 # d
-
-        self.header_size = _from_synch_safe(struct.unpack('!4b', file.read(4)))
-
-        while 1:
-            if file.tell() >= self.header_size:
-                break
-            frame = ID3v2Frame(file, self.major_version)
-            if frame.padding:
-                file.seek(self.header_size)
-                break
-
-            self.frames = self.frames + [frame]
-            self.tags[frame.name] = frame.data
 
 _bitrates = [
     [ # MPEG-2 & 2.5
@@ -349,7 +126,8 @@ class MPEG:
         self.length = 0
         self.length_minutes = 0
         self.length_seconds = 0
-        self.total_time = 0 # added for easy incorporation into edna
+        # added for easy incorporation into edna
+        self.total_time = 0
 
         # The longest possible frame for any MPEG audio file
         # is 4609 bytes for a MPEG 2, Layer 1 256 kbps, 8000Hz with
@@ -371,23 +149,18 @@ class MPEG:
                                            seekstart=test_pos,
                                            check_next_header=2)
         if offset == -1 or header is None:
-            raise Error("Failed MPEG frame test.")
-            
-        # Now we can look for the first header
-        offset, header = self._find_header(file, seeklimit, seekstart)
-        if offset == -1 or header is None:
-            raise Error("Could not find MPEG header")
-
-        # Note that _find_header already parsed the header
-        
-        if not self.valid:
-            raise Error("MPEG header not valid")
-
-        self._parse_xing(file, seekstart, seeklimit)
-
-        self.length_minutes = int(self.length / 60)
-        self.length_seconds = int(round(self.length % 60))
-        self.total_time = self.length # added for easy incorporation into edna
+            print "Failed MPEG frame test: %s"%(file.name)
+        else:    
+            # Now we can look for the first header
+            offset, header = self._find_header(file, seeklimit, seekstart)
+            if offset == -1 or header is None or not self.valid:
+                print "Could not find valid MPEG header: %s"%(file.name)
+            else:
+                # Note that _find_header already parsed the header
+                self._parse_xing(file, seekstart, seeklimit)
+                self.length_minutes = int(self.length / 60)
+                self.length_seconds = int(round(self.length % 60))
+                self.total_time = self.length # added for easy incorporation into edna
 
     def _find_header(self, file, seeklimit=_MP3_HEADER_SEEK_LIMIT,
                      seekstart=0, check_next_header=1):
@@ -570,72 +343,61 @@ class MPEG:
         # now just in case
         if seekstart != 0:
             self._parse_xing(file, 0, seeklimit)
-        
+      
 class MP3Info:
-
     num_regex = re.compile("\d+")
-    
+ 
     def __init__(self, file):
-        self.valid = 0
-
-        self.id3 = None
-        self.mpeg = None
-
-        # No sense in making clients guess whether these variables exists
         self.title = self.artist = self.track = self.year = \
                      self.comment = self.composer = self.album = \
                      self.disc = self.genre = self.encoder = None
 
-        id3 = ID3v1(file)
-        if id3.valid:
-            self.id3 = id3
+        id3 = id3reader.Reader(file)
+        if id3 and id3.frames and id3.frames != {}:
+            self.title = id3.getValue('title')
+            self.artist = id3.getValue('artist')
+            self.track = id3.getValue('track')
+            self.year = id3.getValue('year')
+            self.comment = id3.getValue('comment')
+            self.album = id3.getValue('album')
+            self.genre = id3.getValue('genre')
+            if self.genre and self.genre[0] == '(' and self.genre[-1] == ')':
+                genres = self.num_regex.findall(self.genre)
+                if len(genres) > 0:
+                    try:
+                        # Force to single value even if multiple
+                        self.genre = id3reader.genres[int(genres[0])]
+                    except IndexError:
+                        self.genre = ""
+                else:
+                    self.genre = ""
+            self.composer = id3.getValue('composer')
+            self.disc = id3.getValue('disc')
+            self.encoder = id3.getValue('encoder')
 
-        id3v2 = ID3v2(file)
-        if id3v2.valid and id3v2.tags != {}:
-            self.id3 = id3v2
-
-        if id3v2.valid:
+        mpeg = None
+        if id3 and id3.header and id3.header.majorVersion and id3.header.majorVersion >= 2:
             # ID3v2 size (header_size) doesn't include 10 bytes of header
-            self.mpeg = MPEG(file, seekstart=id3v2.header_size+10)
+            mpeg = MPEG(file, seekstart=id3.header.size+10)
         else:
             # Header better be near the beginning if there is no ID3v2
-            self.mpeg = MPEG(file)
+            mpeg = MPEG(file)
 
-
-        if self.id3 is None:
-            return
-        
-        for tag in self.id3.tags.keys():
-            if tag == 'TT2' or tag == 'TIT2':
-                self.title = self.id3.tags[tag]
-            elif tag == 'TP1' or tag == 'TPE1':
-                self.artist = self.id3.tags[tag]
-            elif tag == 'TRK' or tag == 'TRCK':
-                self.track = self.id3.tags[tag]
-            elif tag == 'TYE' or tag == 'TYER':
-                self.year = self.id3.tags[tag]
-            elif tag == 'COM' or tag == 'COMM':
-                self.comment = self.id3.tags[tag]
-            elif tag == 'TCM':
-                self.composer = self.id3.tags[tag]
-            elif tag == 'TAL' or tag == 'TALB':
-                self.album = self.id3.tags[tag]
-            elif tag == 'TPA':
-                self.disc = self.id3.tags[tag]
-            elif tag == 'TCO' or tag == 'TCON':
-                self.genre = self.id3.tags[tag]
-                if self.genre and self.genre[0] == '(' and self.genre[-1] == ')':
-                    genres = self.num_regex.findall(self.genre)
-                    if len(genres) > 0:
-                        try:
-                            # Force to single valued even if multiple
-                            self.genre = _genres[int(genres[0])]
-                        except IndexError:
-                            self.genre = ""
-                    else:
-                        self.genre = ""
-            elif tag == 'TEN' or tag == 'TENC':
-                self.encoder = self.id3.tags[tag]
+        if mpeg:
+            if mpeg.total_time > 0:
+                self.total_time = mpeg.total_time
+                self.filesize = mpeg.filesize2
+                self.bitrate = int(mpeg.bitrate)
+                self.samplerate = mpeg.samplerate/1000
+                self.mode = mpeg.mode
+                self.mode_extension = mpeg.mode_extension
+            else:
+                self.total_time = 0
+                self.filesize = mpeg.filesize2
+                self.bitrate = "unknown"
+                self.samplerate = "unknown"
+                self.mode = ""
+                self.mode_extension = ""
 
 if __name__ == '__main__':
     import sys
