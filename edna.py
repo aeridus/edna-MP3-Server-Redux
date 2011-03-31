@@ -780,7 +780,7 @@ class EdnaRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     #Seek if the client requests it (an HTTP/1.1 request)
     if range:
-      filetype, seek = string.split(range,'=')
+      temp, seek = string.split(range,'=')
       startSeek, endSeek = string.split(seek,'-')
       f.seek(int(startSeek))
       clen = clen - int(startSeek)
